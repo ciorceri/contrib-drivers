@@ -16,8 +16,6 @@
 
 package com.google.android.things.contrib.driver.hx711;
 
-import android.graphics.Color;
-import android.support.annotation.VisibleForTesting;
 import android.util.Log;
 
 import com.google.android.things.pio.PeripheralManagerService;
@@ -26,7 +24,7 @@ import com.google.android.things.pio.SpiDevice;
 import java.io.IOException;
 
 /**
- * Device driver for HX711 (24-Bit Analog-to-Digital Converter (ADC) for Weigh Scales).
+ * Device driver for HX711 (24-Bit Analog-to-Digital Converter [ADC] for Weight Scales).
  *
  * For information on the HX711, see:
  *   https://cdn.sparkfun.com/datasheets/Sensors/ForceFlex/hx711_english.pdf
@@ -36,10 +34,11 @@ import java.io.IOException;
 public class hx711 implements AutoCloseable {
     private static final String TAG = "hx711";
     private int offset = 0;
+    private double scale = 1.0;
+
     private static final int SPI_FREQUENCY = 115200;
     private static final int SPI_MODE = SpiDevice.MODE0;
     private static final int SPI_BPW = 8;   // bits per word
-    private byte[] txBuffer;
 
     /**
      * The gain of HX711
@@ -63,27 +62,18 @@ public class hx711 implements AutoCloseable {
     };
 
     private Gain mGain;
-    private SpiDevice mDevice = null;
+    private String mSpiBusPort;
+    private SpiDevice spiDevice = null;
 
     /**
      * Create a new hx711 driver.
      *
      * @param spiBusPort Name of the SPI bus
-     * @param gain The {@link Gain} indicating the red/green/blue byte ordering for the device.
+     * @param gain (32, 64, 128)
      */
     public hx711(String spiBusPort, Gain gain) throws IOException {
         setGain(gain);
-        PeripheralManagerService pioService = new PeripheralManagerService();
-        mDevice = pioService.openSpiDevice(spiBusPort);
-        try {
-            configure(mDevice);
-        } catch (IOException|RuntimeException e) {
-            try {
-                close();
-            } catch (IOException|RuntimeException ignored) {
-            }
-            throw e;
-        }
+        setSpiBusPort(spiBusPort);
     }
 
     /**
@@ -93,7 +83,7 @@ public class hx711 implements AutoCloseable {
      */
     private void configure(SpiDevice device) throws IOException {
         // Note: You may need to set bit justification for your board.
-        // mDevice.setBitJustification(SPI_BITJUST);
+        // spiDevice.setBitJustification(SPI_BITJUST);
         device.setFrequency(SPI_FREQUENCY);
         device.setMode(SPI_MODE);
         device.setBitsPerWord(SPI_BPW);
@@ -103,30 +93,82 @@ public class hx711 implements AutoCloseable {
      * Returns true is HX711 is ready to read weight
      * @return
      */
-    public boolean isReady() {
+    public boolean isReady() throws IOException {
+        byte[] txBuffer= { (byte) 0x00 };
+        byte[] response = new byte[1];
+        readRaw(txBuffer, response);
+        for (byte i=0; i<response.length; i++) {
+            if (response[i] != 0x00) {
+                return false;
+            }
+        }
         return true;
     }
 
     /**
-     * It sets the gain and channel used to read
+     * It sets the gain used to read HX711 ADC
      */
     public void setGain(Gain gain) {
         mGain = gain;
     }
 
     /**
-     * It reads the weight value (one read)
+     * It sets the port used to read HX711 ADC
+     */
+    public void setSpiBusPort(String spiPort) {
+        mSpiBusPort = spiPort;
+    }
+
+    /**
+     * Do a calibration with a known weight (units)
+     * @param units
+     * @param times
+     * @throws IOException
+     */
+    public void calibrateUnits(int units, int times) throws IOException {
+        int curentValue = readAverage(times);
+        scale = curentValue / units;
+        Log.d(TAG + " scale", "" + scale);
+    }
+
+    /**
+     * Get a reading in KG (or other units)
+     * @param times
+     * @return
+     * @throws IOException
+     */
+    public double getUnits(int times) throws IOException {
+        return (readAverage(times) / scale);
+    }
+
+    /**
+     * It reads the HX711 ADC value (multiple reads)
+     * @param times
+     * @return
+     */
+    public int readAverage(int times) throws IOException {
+        long sum = 0;
+        for (int i=0; i<times; i++) {
+            sum += read();
+        }
+        return (int) (sum / times) - offset;
+    }
+
+    /**
+     * It reads the HX711 ADC value (one read)
      * @return
      */
     public int read() throws IOException {
         int value = 0;
+        byte[] txBuffer = gainArray[mGain.value];
         byte[] response = new byte[10];
         byte[] response_complement = new byte[10];
 
-        txBuffer = gainArray[mGain.value];
-        mDevice.transfer(txBuffer, response, txBuffer.length);
+        while (!isReady()) {}
 
-        // TODO: check if response.length != 6
+        readRaw(txBuffer, response);
+
+        // TODO: validate response
 
         for (byte i=0; i<6; i++) {
             response[i] = (byte) ~response[i];
@@ -142,33 +184,45 @@ public class hx711 implements AutoCloseable {
                 (response_complement[4] << 4) +
                 response_complement[5];
 
-        if (mDevice != null) {
-            mDevice.close();
-            mDevice = null;
-        }
-
         return value;
     }
 
     /**
-     * It reads the weight value (multiple reads)
-     * @param times
-     * @return
+     * The RAW way to do a read (txBuffer should be the Clock signal)
+     * @param txBuffer
+     * @param response
+     * @throws IOException
      */
-    public int readAverage(int times) throws IOException {
-        long sum = 0;
-        for (int i=0; i<times; i++) {
-            sum += read();
+    private void readRaw(byte[] txBuffer, byte[] response) throws IOException {
+        PeripheralManagerService pioService = new PeripheralManagerService();
+
+        spiDevice = pioService.openSpiDevice(mSpiBusPort);
+        try {
+            configure(spiDevice);
+        } catch (IOException|RuntimeException e) {
+            try {
+                close();
+            } catch (IOException|RuntimeException ignored) {
+            }
+            throw e;
         }
-        return (int) (sum / times);
+
+        spiDevice.transfer(txBuffer, response, txBuffer.length);
+
+        if (spiDevice != null) {
+            spiDevice.close();
+            spiDevice = null;
+        }
     }
 
     /**
-     *
+     * It sets the offset to 0
      * @param times
      */
-    public void tare(short times) throws IOException {
-        setOffset(readAverage(times));
+    public void tare(int times) throws IOException {
+        int offset = readAverage(times);
+        setOffset(offset);
+        Log.d(TAG + " offset", "" + offset);
     }
 
     public void setOffset(int offset) {
@@ -179,23 +233,16 @@ public class hx711 implements AutoCloseable {
         return this.offset;
     }
 
-    public void powerDown() {
-    }
-
-    public void powerUp() {
-    }
-
-
     /**
      * Releases the SPI interface and related resources.
      */
     @Override
     public void close() throws IOException {
-        if (mDevice != null) {
+        if (spiDevice != null) {
             try {
-                mDevice.close();
+                spiDevice.close();
             } finally {
-                mDevice = null;
+                spiDevice = null;
             }
         }
     }
