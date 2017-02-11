@@ -76,6 +76,18 @@ public class hx711 implements AutoCloseable {
         setSpiBusPort(spiBusPort);
     }
 
+    public void setGain(Gain gain) { mGain = gain; }
+
+    public void setOffset(int offset) { this.offset = offset; }
+
+    public void setScale(double scale) { this.scale = scale; }
+
+    public void setSpiBusPort(String spiPort) { mSpiBusPort = spiPort; }
+
+    public int getOffset() {
+        return this.offset;
+    }
+
     /**
      * Initial configuration of driver
      * @param device
@@ -106,20 +118,6 @@ public class hx711 implements AutoCloseable {
     }
 
     /**
-     * It sets the gain used to read HX711 ADC
-     */
-    public void setGain(Gain gain) {
-        mGain = gain;
-    }
-
-    /**
-     * It sets the port used to read HX711 ADC
-     */
-    public void setSpiBusPort(String spiPort) {
-        mSpiBusPort = spiPort;
-    }
-
-    /**
      * Do a calibration with a known weight (units)
      * @param units
      * @param times
@@ -127,8 +125,8 @@ public class hx711 implements AutoCloseable {
      */
     public void calibrateUnits(int units, int times) throws IOException {
         int curentValue = readAverage(times);
-        scale = curentValue / units;
-        Log.d(TAG + " scale", "" + scale);
+        setScale(curentValue / units);
+        Log.d(TAG + " new scale", "" + this.scale);
     }
 
     /**
@@ -138,7 +136,7 @@ public class hx711 implements AutoCloseable {
      * @throws IOException
      */
     public double getUnits(int times) throws IOException {
-        return (readAverage(times) / scale);
+        return (readAverage(times) / this.scale);
     }
 
     /**
@@ -151,14 +149,14 @@ public class hx711 implements AutoCloseable {
         for (int i=0; i<times; i++) {
             sum += read();
         }
-        return (int) (sum / times) - offset;
+        return (int) (sum / times) - this.offset;
     }
 
     /**
      * It reads the HX711 ADC value (one read)
      * @return
      */
-    public int read() throws IOException {
+    private int read() throws IOException {
         int value = 0;
         byte[] txBuffer = gainArray[mGain.value];
         byte[] response = new byte[10];
@@ -168,8 +166,20 @@ public class hx711 implements AutoCloseable {
 
         readRaw(txBuffer, response);
 
-        // TODO: validate response
+        // simple response validation
+        boolean validResponse = false;
+        for (byte i=0; i<=6; i++) {
+            if (response[i] != 0)   // first 7 bytes should be not 0
+                validResponse = true;
+        }
+        for (byte i=7; i<=9; i++) {
+            if (response[i] != 0)   // last 3 bytes must be 0
+                validResponse = false;
+        }
+        if (! validResponse)
+            throw new IOException("Received an invalid response from HX711");
 
+        // convert response to useful value
         for (byte i=0; i<6; i++) {
             response[i] = (byte) ~response[i];
             response_complement[i] = (byte) (((response[i] & 0b01000000) >> 3) +
@@ -216,21 +226,13 @@ public class hx711 implements AutoCloseable {
     }
 
     /**
-     * It sets the offset to 0
+     * It sets the offset value for tare weight
      * @param times
      */
     public void tare(int times) throws IOException {
         int offset = readAverage(times);
         setOffset(offset);
-        Log.d(TAG + " offset", "" + offset);
-    }
-
-    public void setOffset(int offset) {
-        this.offset = offset;
-    }
-
-    public int getOffset() {
-        return this.offset;
+        Log.d(TAG + " new offset", "" + offset);
     }
 
     /**
